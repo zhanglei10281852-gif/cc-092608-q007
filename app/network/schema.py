@@ -146,6 +146,42 @@ CREATE TABLE IF NOT EXISTS subscriber_entitlements (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_entitlements_lookup ON subscriber_entitlements(subscriber_hash,scenario_id,state,valid_from,valid_until);
+CREATE TABLE IF NOT EXISTS entitlement_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT NOT NULL,
+    event_seq INTEGER NOT NULL CHECK(event_seq >= 1),
+    event_type TEXT NOT NULL CHECK(event_type IN ('purchase','extend','pause','resume','refund','expire')),
+    business_version INTEGER NOT NULL CHECK(business_version >= 1),
+    subscriber_hash TEXT NOT NULL,
+    scenario_id INTEGER REFERENCES network_scenarios(id),
+    product_code TEXT NOT NULL DEFAULT '',
+    valid_from TEXT,
+    valid_until TEXT,
+    occurred_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    payload_digest TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('applied','stale','rejected')),
+    decision_reason TEXT NOT NULL DEFAULT '',
+    UNIQUE(order_id, event_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_entitlement_events_order ON entitlement_events(order_id,business_version,event_seq);
+CREATE TABLE IF NOT EXISTS entitlement_order_projection (
+    order_id TEXT PRIMARY KEY,
+    subscriber_hash TEXT NOT NULL,
+    scenario_id INTEGER NOT NULL REFERENCES network_scenarios(id),
+    product_code TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','suspended','expired','cancelled')),
+    version INTEGER NOT NULL CHECK(version >= 1),
+    valid_from TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    paused_at TEXT,
+    pause_total_seconds INTEGER NOT NULL DEFAULT 0,
+    last_event_seq INTEGER NOT NULL,
+    applied_events INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entitlement_projection_subscriber ON entitlement_order_projection(subscriber_hash,scenario_id,status);
 CREATE TABLE IF NOT EXISTS rollout_campaigns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scenario_id INTEGER NOT NULL REFERENCES network_scenarios(id),

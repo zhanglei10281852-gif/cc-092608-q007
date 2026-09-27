@@ -9,6 +9,7 @@ from app.api import audit, auth, maintenance, roles, system, users
 from app.core.errors import DomainError
 from app.database import close_connection, get_connection, init_db
 from app.network.router import router as network_router
+from app.network.entitlement_router import router as entitlement_router
 from app.network.operations_router import router as operations_router
 from app.network.schema import ensure_network_schema
 
@@ -41,6 +42,7 @@ app.include_router(audit.router)
 app.include_router(system.router)
 app.include_router(maintenance.router)
 app.include_router(network_router)
+app.include_router(entitlement_router)
 app.include_router(operations_router)
 
 
