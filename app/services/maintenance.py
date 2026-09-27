@@ -33,7 +33,7 @@ class MaintenanceService:
         "department_memberships", "audit_events", "background_jobs", "network_scenarios",
         "network_segments", "application_profiles", "policy_versions", "experience_samples",
         "quality_incidents", "acceleration_sessions", "capacity_reservations", "session_events",
-        "subscriber_entitlements",
+        "subscriber_entitlements", "entitlement_event_log",
     )
 
     def __init__(self, connection: sqlite3.Connection, clock: Clock | None = None) -> None:

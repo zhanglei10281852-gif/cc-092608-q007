@@ -133,19 +133,6 @@ CREATE TABLE IF NOT EXISTS session_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_events ON session_events(session_id,id);
-CREATE TABLE IF NOT EXISTS subscriber_entitlements (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    subscriber_hash TEXT NOT NULL,
-    scenario_id INTEGER NOT NULL REFERENCES network_scenarios(id),
-    product_code TEXT NOT NULL,
-    valid_from TEXT NOT NULL,
-    valid_until TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','suspended','expired','cancelled')),
-    source_order_id TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_entitlements_lookup ON subscriber_entitlements(subscriber_hash,scenario_id,state,valid_from,valid_until);
 CREATE TABLE IF NOT EXISTS rollout_campaigns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scenario_id INTEGER NOT NULL REFERENCES network_scenarios(id),
@@ -201,6 +188,88 @@ CREATE TABLE IF NOT EXISTS operation_events (
 CREATE INDEX IF NOT EXISTS idx_operation_events_resource ON operation_events(resource_type,resource_id,id);
 '''
 
+# 用户权益投影：由权益事件账本按订单业务版本归并而成，可随时删除后重建。
+ENTITLEMENT_PROJECTION_TABLE = r'''
+CREATE TABLE IF NOT EXISTS subscriber_entitlements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscriber_hash TEXT NOT NULL,
+    scenario_id INTEGER NOT NULL REFERENCES network_scenarios(id),
+    product_code TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','suspended','expired','cancelled','refunded')),
+    source_order_id TEXT NOT NULL UNIQUE,
+    applied_version INTEGER NOT NULL DEFAULT 1,
+    last_event_seq INTEGER,
+    suspended_at TEXT,
+    refunded_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entitlements_lookup ON subscriber_entitlements(subscriber_hash,scenario_id,state,valid_from,valid_until);
+'''
+
+# 用户权益事件账本：只增不改的不可变事实表，触发器在数据库层面禁止更新与删除。
+ENTITLEMENT_LEDGER_TABLE = r'''
+CREATE TABLE IF NOT EXISTS entitlement_event_log (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_system TEXT NOT NULL DEFAULT 'carrier-app',
+    source_event_no TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('purchase','extend','suspend','resume','refund','expire')),
+    business_version INTEGER NOT NULL CHECK(business_version >= 1),
+    subscriber_hash TEXT NOT NULL,
+    scenario_code TEXT NOT NULL,
+    product_code TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    valid_from TEXT,
+    valid_until TEXT,
+    new_valid_until TEXT,
+    reason TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK(disposition IN ('accepted','stale','invalid')),
+    reject_reason TEXT NOT NULL DEFAULT '',
+    recorded_at TEXT NOT NULL
+);
+-- 只有归并成功的事件占用来源事件号：被拒送达会留下审计行，但补齐版本后重放同一事件仍可归并
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entitlement_ledger_dedup
+    ON entitlement_event_log(source_system, source_event_no) WHERE disposition='accepted';
+CREATE INDEX IF NOT EXISTS idx_entitlement_ledger_order ON entitlement_event_log(order_id,business_version,seq);
+CREATE INDEX IF NOT EXISTS idx_entitlement_ledger_subscriber ON entitlement_event_log(subscriber_hash,scenario_code,seq);
+CREATE TRIGGER IF NOT EXISTS entitlement_event_log_no_update BEFORE UPDATE ON entitlement_event_log
+BEGIN SELECT RAISE(ABORT, 'entitlement_event_log is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS entitlement_event_log_no_delete BEFORE DELETE ON entitlement_event_log
+BEGIN SELECT RAISE(ABORT, 'entitlement_event_log is immutable'); END;
+'''
+
+NETWORK_SCHEMA = NETWORK_SCHEMA + ENTITLEMENT_PROJECTION_TABLE + ENTITLEMENT_LEDGER_TABLE
+
 
 def ensure_network_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(NETWORK_SCHEMA)
+    _migrate_subscriber_entitlements(connection)
+
+
+def _migrate_subscriber_entitlements(connection: sqlite3.Connection) -> None:
+    """把旧版权益表重建为投影表：放宽状态约束并补充版本归并字段。"""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='subscriber_entitlements'"
+    ).fetchone()
+    if row is None or "'refunded'" in row[0]:
+        return
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute("ALTER TABLE subscriber_entitlements RENAME TO subscriber_entitlements_legacy")
+        connection.executescript(ENTITLEMENT_PROJECTION_TABLE)
+        connection.execute(
+            "INSERT INTO subscriber_entitlements"
+            "(id,subscriber_hash,scenario_id,product_code,valid_from,valid_until,state,source_order_id,created_at,updated_at) "
+            "SELECT id,subscriber_hash,scenario_id,product_code,valid_from,valid_until,state,source_order_id,created_at,updated_at "
+            "FROM subscriber_entitlements_legacy"
+        )
+        connection.execute("DROP TABLE subscriber_entitlements_legacy")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")

@@ -55,6 +55,20 @@ def sample_payload(**overrides):
     return payload
 
 
+def entitlement_payload(**overrides):
+    now = datetime.now(UTC)
+    payload = {
+        "subscriber_hash": sample_payload()["subscriber_hash"],
+        "scenario_code": "gdh-rail",
+        "product_code": "rail-boost-day",
+        "valid_from": to_storage(now - timedelta(days=1)),
+        "valid_until": to_storage(now + timedelta(days=1)),
+        "source_order_id": "order-000001",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def prepare(client):
     scenario = client.post("/api/network/scenarios", json=scenario_payload())
     assert scenario.status_code == 201, scenario.text
@@ -105,17 +119,7 @@ def test_acceleration_requires_entitlement_and_releases_capacity(client):
     sample = client.post("/api/network/samples", json=sample_payload()).json()
     denied = client.post(f"/api/network/incidents/{sample['incident_id']}/accelerate", json={"actor": "tests"})
     assert denied.status_code == 409
-    entitlement = client.post(
-        "/api/network/entitlements",
-        json={
-            "subscriber_hash": sample_payload()["subscriber_hash"],
-            "scenario_code": "gdh-rail",
-            "product_code": "rail-boost-day",
-            "valid_from": "2026-09-26T00:00:00Z",
-            "valid_until": "2026-09-27T00:00:00Z",
-            "source_order_id": "order-000001",
-        },
-    )
+    entitlement = client.post("/api/network/entitlements", json=entitlement_payload())
     assert entitlement.status_code == 201
     started = client.post(f"/api/network/incidents/{sample['incident_id']}/accelerate", json={"actor": "tests"})
     assert started.status_code == 200, started.text
@@ -134,17 +138,7 @@ def test_acceleration_requires_entitlement_and_releases_capacity(client):
 
 def test_expired_session_reopens_incident_with_fixed_clock(client):
     prepare(client)
-    client.post(
-        "/api/network/entitlements",
-        json={
-            "subscriber_hash": sample_payload()["subscriber_hash"],
-            "scenario_code": "gdh-rail",
-            "product_code": "rail-boost-day",
-            "valid_from": "2026-09-26T00:00:00Z",
-            "valid_until": "2026-09-27T00:00:00Z",
-            "source_order_id": "order-000002",
-        },
-    )
+    client.post("/api/network/entitlements", json=entitlement_payload(source_order_id="order-000002"))
     sample = client.post("/api/network/samples", json=sample_payload(sample_key="sample-000002")).json()
     started = client.post(f"/api/network/incidents/{sample['incident_id']}/accelerate", json={"actor": "tests"}).json()
     connection = get_connection()
@@ -167,14 +161,7 @@ def test_capacity_limit_rejects_second_session(client):
         subscriber = f"subscriber-{index:018d}"
         client.post(
             "/api/network/entitlements",
-            json={
-                "subscriber_hash": subscriber,
-                "scenario_code": "gdh-rail",
-                "product_code": "rail-boost-day",
-                "valid_from": "2026-09-26T00:00:00Z",
-                "valid_until": "2026-09-27T00:00:00Z",
-                "source_order_id": f"order-capacity-{index:03d}",
-            },
+            json=entitlement_payload(subscriber_hash=subscriber, source_order_id=f"order-capacity-{index:03d}"),
         )
         sample = client.post("/api/network/samples", json=sample_payload(sample_key=f"sample-capacity-{index:03d}", subscriber_hash=subscriber)).json()
         response = client.post(f"/api/network/incidents/{sample['incident_id']}/accelerate", json={"actor": "tests"})

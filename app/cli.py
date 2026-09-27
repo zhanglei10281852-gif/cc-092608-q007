@@ -48,6 +48,10 @@ def command_smoke() -> int:
 
 
 def command_network_demo() -> int:
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.clock import to_storage
+
     with TestClient(app) as client:
         seeded = client.post("/api/network/demo/seed")
         if seeded.status_code != 200:
@@ -60,8 +64,8 @@ def command_network_demo() -> int:
                 "subscriber_hash": "subscriber-demo-0000000001",
                 "scenario_code": "gdh-rail",
                 "product_code": "rail-boost-day",
-                "valid_from": "2026-09-26T00:00:00Z",
-                "valid_until": "2026-09-27T00:00:00Z",
+                "valid_from": to_storage(datetime.now(UTC) - timedelta(days=1)),
+                "valid_until": to_storage(datetime.now(UTC) + timedelta(days=1)),
                 "source_order_id": "demo-order-000001",
             },
         )

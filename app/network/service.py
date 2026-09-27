@@ -9,6 +9,7 @@ from app.core.clock import Clock, SystemClock, from_storage, to_storage
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.security import request_fingerprint
 from app.database import get_connection, transaction
+from app.network.ledger_service import EntitlementLedgerService
 from app.network.repository import NetworkRepository
 from app.network.rules import DEFAULT_RULES, allocation_for, canonical_rules, judge_quality
 from app.network.schema import ensure_network_schema
@@ -103,24 +104,35 @@ class NetworkAccelerationService:
             return NetworkRepository._policy(NetworkRepository(connection).policy_by_id(policy_id))
 
     def add_entitlement(self, payload: dict[str, Any]) -> dict[str, Any]:
-        scenario = self._scenario(payload["scenario_code"])
+        """旧版权益登记入口：转写为账本 purchase 事件（业务版本 1）。
+
+        同一 source_order_id 重复登记视为重放，返回既有投影，保持幂等。
+        """
         try:
-            start = to_storage(from_storage(payload["valid_from"]))
-            end = to_storage(from_storage(payload["valid_until"]))
+            start = from_storage(payload["valid_from"])
+            end = from_storage(payload["valid_until"])
         except ValueError as exc:
             raise ValidationError("权益有效期格式不正确") from exc
         if end <= start:
             raise ValidationError("权益结束时间必须晚于开始时间")
-        now = to_storage(self.clock.now())
-        with transaction(immediate=True) as connection:
-            existing = connection.execute("SELECT * FROM subscriber_entitlements WHERE source_order_id=?", (payload["source_order_id"],)).fetchone()
-            if existing is not None:
-                return dict(existing)
-            cursor = connection.execute(
-                "INSERT INTO subscriber_entitlements(subscriber_hash,scenario_id,product_code,valid_from,valid_until,source_order_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                (payload["subscriber_hash"], scenario["id"], payload["product_code"], start, end, payload["source_order_id"], now, now),
-            )
-            return dict(connection.execute("SELECT * FROM subscriber_entitlements WHERE id=?", (cursor.lastrowid,)).fetchone())
+        event = {
+            "source_system": "legacy-api",
+            "source_event_no": f"legacy:{payload['source_order_id']}",
+            "order_id": payload["source_order_id"],
+            "event_type": "purchase",
+            "business_version": 1,
+            "subscriber_hash": payload["subscriber_hash"],
+            "scenario_code": payload["scenario_code"],
+            "product_code": payload["product_code"],
+            "occurred_at": to_storage(start),
+            "valid_from": to_storage(start),
+            "valid_until": to_storage(end),
+        }
+        result = EntitlementLedgerService(self.connection, self.clock).ingest_event(event)
+        projection = result["projection"]
+        if projection is None:
+            raise ConflictError("权益事件被拒绝", context={"reject_reason": result["event"].get("reject_reason")})
+        return projection
 
     def ingest_sample(self, payload: dict[str, Any]) -> dict[str, Any]:
         scenario = self._scenario(payload["scenario_code"])
